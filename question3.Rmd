@@ -1,0 +1,170 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# 1. Load the training and testing datasets
+train_data <- read.csv("q3_train.csv")
+test_data <- read.csv("q3_test.csv")
+
+# Ensure your column names match exactly. If they are uppercase (X and Y), change them below.
+# 2. Fit the cubic logistic regression model on the training data
+cubic_log_mod <- glm(y ~ x + I(x^2) + I(x^3), 
+                     data = train_data, 
+                     family = binomial(link = "logit"))
+
+# 3. View the estimated parameters (b0, b1, b2, b3) and model diagnostics
+summary(cubic_log_mod)
+
+# 4. Predict probabilities on the test dataset
+test_probs <- predict(cubic_log_mod, newdata = test_data, type = "response")
+
+# 5. Apply the 0.5 threshold classification rule
+test_preds <- ifelse(test_probs >= 0.5, 1, 0)
+
+# 6. Evaluate Model Performance (Assuming test.csv has the actual 'y' values)
+conf_matrix <- table(Predicted = test_preds, Actual = test_data$y)
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+
+cat("\n--- Test Set Confusion Matrix ---\n")
+print(conf_matrix)
+cat("\nTest Accuracy:", round(accuracy, 4), "\n")
+
+```
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+
+# 1. Create a sequence of x values for smooth plotting
+x_seq <- data.frame(x = seq(min(train_data$x), max(train_data$x), length.out = 500))
+
+# 2. Predict the linear predictor (log-odds) and probabilities for the sequence
+x_seq$linear_predictor <- predict(cubic_log_mod, newdata = x_seq, type = "link")
+x_seq$predicted_prob <- predict(cubic_log_mod, newdata = x_seq, type = "response")
+
+# 3. Plot the Global Cubic Linear Predictor (eta) against x
+p1 <- ggplot(x_seq, aes(x = x, y = linear_predictor)) +
+  geom_line(color = "royalblue", linewidth = 1.2) +
+  theme_minimal() +
+  labs(title = "Global Cubic Linear Predictor",
+       x = "Covariate (x)",
+       y = expression(hat(eta) == logit(P(Y==1)))) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# 4. Plot the Predicted Probability P(Y=1|x) against x, overlaying actual training data
+p2 <- ggplot(x_seq, aes(x = x, y = predicted_prob)) +
+  geom_line(color = "firebrick", linewidth = 1.2) +
+  geom_point(data = train_data, aes(x = x, y = y), alpha = 0.3, color = "black", shape = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  theme_minimal() +
+  labs(title = "Predicted Probability",
+       x = "Covariate (x)",
+       y = expression(P(Y==1 ~ "|" ~ x))) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# 5. Arrange side-by-side and save
+combined_plot <- grid.arrange(p1, p2, ncol = 2)
+ggsave("cubic_logistic_plots.png", plot = combined_plot, width = 10, height = 5, dpi = 300)
+
+```
+
+```{r}
+# Define the requested probabilities for the knots
+knot_probs <- c(0.05, 0.275, 0.5, 0.725, 0.95)
+
+# Calculate the knot locations based on sample quantiles of x
+knots <- quantile(train_data$x, probs = knot_probs)
+
+# Print the estimated knot values
+print(knots)
+
+```
+
+```{r}
+library(splines)
+
+# 1. Define the knots based on your quantile output
+b_knots <- c(0.921255, 7.355660)       # 5% and 95% quantiles
+i_knots <- c(2.633280, 3.912600, 5.107630) # 27.5%, 50%, and 72.5% quantiles
+
+# 2. Fit the natural cubic spline logistic regression
+ns_log_mod <- glm(y ~ ns(x, knots = i_knots, Boundary.knots = b_knots), 
+                  data = train_data, 
+                  family = binomial(link = "logit"))
+
+# 3. View the summary
+summary(ns_log_mod)
+
+# 4. Evaluate on test data
+test_probs_ns <- predict(ns_log_mod, newdata = test_data, type = "response")
+test_preds_ns <- ifelse(test_probs_ns >= 0.5, 1, 0)
+
+conf_matrix_ns <- table(Predicted = test_preds_ns, Actual = test_data$y)
+accuracy_ns <- sum(diag(conf_matrix_ns)) / sum(conf_matrix_ns)
+
+cat("\n--- Test Set Confusion Matrix (Natural Splines) ---\n")
+print(conf_matrix_ns)
+cat("\nTest Accuracy (Natural Splines):", round(accuracy_ns, 4), "\n")
+
+
+```
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+
+# 1. Ensure the prediction data frame (x_seq) has the spline basis predictions
+x_seq$ns_linear_predictor <- predict(ns_log_mod, newdata = x_seq, type = "link")
+x_seq$ns_predicted_prob <- predict(ns_log_mod, newdata = x_seq, type = "response")
+
+# 2. Plot comparison for the Linear Predictor (Global Cubic vs Natural Spline)
+p1_compare <- ggplot(x_seq, aes(x = x)) +
+  geom_line(aes(y = linear_predictor, color = "Global Cubic"), linewidth = 1.2) +
+  geom_line(aes(y = ns_linear_predictor, color = "Natural Cubic Spline"), linewidth = 1.2, linetype = "solid") +
+  scale_color_manual(name = "Model", values = c("Global Cubic" = "royalblue", "Natural Cubic Spline" = "darkorange")) +
+  theme_minimal() +
+  labs(title = "Comparison: Linear Predictors",
+       x = "Covariate (x)",
+       y = expression(hat(eta) == logit(P(Y==1)))) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom")
+
+# 3. Plot comparison for the Predicted Probabilities (Global Cubic vs Natural Spline)
+p2_compare <- ggplot(x_seq, aes(x = x)) +
+  geom_line(aes(y = predicted_prob, color = "Global Cubic"), linewidth = 1.2) +
+  geom_line(aes(y = ns_predicted_prob, color = "Natural Cubic Spline"), linewidth = 1.2, linetype = "solid") +
+  geom_point(data = train_data, aes(x = x, y = y), alpha = 0.2, color = "black", shape = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_color_manual(name = "Model", values = c("Global Cubic" = "firebrick", "Natural Cubic Spline" = "darkgreen")) +
+  theme_minimal() +
+  labs(title = "Comparison: Predicted Probabilities",
+       x = "Covariate (x)",
+       y = expression(P(Y==1 ~ "|" ~ x))) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom")
+
+# 4. Arrange side-by-side and save
+combined_compare_plot <- grid.arrange(p1_compare, p2_compare, ncol = 2)
+ggsave("cubic_vs_spline_comparison.png", plot = combined_compare_plot, width = 11, height = 5.5, dpi = 300)
+
+```
+
+```{r}
+# Function to calculate binomial test log-likelihood
+calc_test_loglik <- function(model, test_data) {
+  probs <- predict(model, newdata = test_data, type = "response")
+  # Clip probabilities slightly to avoid log(0) errors
+  probs <- pmin(pmax(probs, 1e-15), 1 - 1e-15)
+  y <- test_data$y
+  sum(y * log(probs) + (1 - y) * log(1 - probs))
+}
+
+# Calculate test log-likelihoods
+test_ll_cubic <- calc_test_loglik(cubic_log_mod, test_data)
+test_ll_ns <- calc_test_loglik(ns_log_mod, test_data)
+
+cat("Global Cubic Test Log-Likelihood:", round(test_ll_cubic, 4), "\n")
+cat("Natural Spline Test Log-Likelihood:", round(test_ll_ns, 4), "\n")
+```

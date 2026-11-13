@@ -1,0 +1,679 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+
+dat <-read.csv("CNR_data.csv",header = TRUE ,sep=",")
+
+head(dat)
+# Load the ggplot2 library for high-quality graphics
+library(ggplot2)
+
+# Assuming your data is in a data frame named 'dat' with columns 'x' and 'y'
+p <- ggplot(dat, aes(x = x, y = y)) +
+  geom_point(alpha = 0.6, color = "steelblue") +  # alpha adds slight transparency
+  theme_minimal() +                               # clean, academic theme
+  labs(
+    title = "Scatter Plot of Response (y) vs Covariate (x)",
+    subtitle = paste("n =", nrow(dat), "observations"),
+    x = "Covariate (x)",
+    y = "Response (y)"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+# Display the plot
+print(p)
+
+# Save the plot to your working directory so you can upload it to Overleaf
+ggsave("scatter_dat.png", plot = p, width = 6, height = 4, dpi = 300)
+
+
+
+```
+
+
+```{r}
+# EM Algorithm for Mixture of Contaminated Normal Regressions (G = 2)
+# Using random initialization
+
+fit_mcn_reg_random <- function(x, y, G = 2, max_iter = 1000, tol = 1e-6) {
+  n <- length(y)
+  X <- cbind(1, x) # Design matrix for SLRM
+  
+  # --- 1. Random Initialization ---
+  set.seed(123) # For reproducibility
+  random_clusters <- sample(1:G, size = n, replace = TRUE)
+  
+  pi_g <- as.numeric(table(random_clusters) / n)
+  beta <- matrix(0, nrow = 2, ncol = G)
+  sigma2 <- rep(0, G)
+  alpha <- rep(0.1, G) # Initialize 10% contamination
+  eta <- rep(5.0, G)   # Initialize variance inflation
+  
+  for (g in 1:G) {
+    idx <- which(random_clusters == g)
+    if(length(idx) > 2) {
+      mod <- lm(y[idx] ~ x[idx])
+      beta[, g] <- coef(mod)
+      sigma2[g] <- max(var(resid(mod)), 1e-6) 
+    } else {
+      beta[, g] <- c(mean(y), 0)
+      sigma2[g] <- max(var(y), 1e-6) 
+    }
+  }
+  
+  ll_old <- -Inf
+  iter <- 0
+  
+  # --- EM Loop ---
+  for (iter in 1:max_iter) {
+    
+    # --- E-Step ---
+    dens_comp <- matrix(0, nrow = n, ncol = G)
+    v_hat <- matrix(0, nrow = n, ncol = G)
+    
+    for (g in 1:G) {
+      mu_g <- X %*% beta[, g]
+      
+      dens_good <- dnorm(y, mean = mu_g, sd = sqrt(sigma2[g]))
+      dens_contam <- dnorm(y, mean = mu_g, sd = sqrt(eta[g] * sigma2[g]))
+      
+      dens_comp[, g] <- (1 - alpha[g]) * dens_good + alpha[g] * dens_contam
+      v_hat[, g] <- ((1 - alpha[g]) * dens_good) / pmax(dens_comp[, g], 1e-16)
+    }
+    
+    weighted_dens <- sweep(dens_comp, 2, pi_g, "*")
+    total_dens <- rowSums(weighted_dens)
+    z_hat <- sweep(weighted_dens, 1, total_dens, "/")
+    
+    ll_new <- sum(log(pmax(total_dens, 1e-16)))
+    
+    # --- Stopping Rule ---
+    if (is.na(ll_new) || abs(ll_new - ll_old) < tol) {
+      break
+    }
+    ll_old <- ll_new
+    
+    # --- M-Step ---
+    n_g <- colSums(z_hat)
+    pi_g <- n_g / n
+    
+    for (g in 1:G) {
+      alpha[g] <- 1 - sum(z_hat[, g] * v_hat[, g]) / max(n_g[g], 1e-8)
+      alpha[g] <- min(max(alpha[g], 1e-4), 0.9999) 
+      
+      w_ig <- z_hat[, g] * (v_hat[, g] + (1 - v_hat[, g]) / eta[g])
+      W <- diag(w_ig)
+      
+      beta[, g] <- tryCatch({
+        solve(t(X) %*% W %*% X) %*% t(X) %*% W %*% y
+      }, error = function(e) beta[, g])
+      
+      mu_g <- X %*% beta[, g]
+      resid2 <- (y - mu_g)^2
+      
+      sigma2[g] <- max(sum(w_ig * resid2) / max(n_g[g], 1e-8), 1e-6)
+      
+      num_eta <- sum(z_hat[, g] * (1 - v_hat[, g]) * resid2)
+      den_eta <- sigma2[g] * sum(z_hat[, g] * (1 - v_hat[, g]))
+      eta[g] <- max(num_eta / max(den_eta, 1e-8), 1.001) 
+    }
+  }
+  
+  # --- Results Output ---
+  cat("--- EM Algorithm Converged ---\n")
+  cat("Iterations:", iter, "\n")
+  cat("Stopping Rule: Absolute change in Log-Likelihood <", tol, "\n")
+  cat("Final Log-Likelihood:", ll_new, "\n\n")
+  
+  cat("--- Parameter Estimates ---\n")
+  for(g in 1:G) {
+    cat(sprintf("Component %d:\n", g))
+    cat(sprintf("  pi (weight) : %.4f\n", pi_g[g]))
+    cat(sprintf("  beta0 (int) : %.4f\n", beta[1, g]))
+    cat(sprintf("  beta1 (slp) : %.4f\n", beta[2, g]))
+    cat(sprintf("  sigma2      : %.4f\n", sigma2[g]))
+    cat(sprintf("  alpha (out) : %.4f\n", alpha[g]))
+    cat(sprintf("  eta (infl)  : %.4f\n\n", eta[g]))
+  }
+  
+  return(list(pi = pi_g, beta = beta, sigma2 = sigma2, alpha = alpha, eta = eta, 
+              ll = ll_new, iter = iter))
+}
+
+# Run the function on your corrected continuous data
+res <- fit_mcn_reg_random(dat$x, dat$y, G = 2)
+
+```
+```{r}
+# 1. Updated fitting function (Seed Removed)
+fit_mcn_reg_random <- function(x, y, G = 2, max_iter = 1000, tol = 1e-6) {
+  n <- length(y)
+  X <- cbind(1, x) 
+  
+  # Random initialization without hardcoded seed
+  random_clusters <- sample(1:G, size = n, replace = TRUE)
+  
+  pi_g <- as.numeric(table(random_clusters) / n)
+  beta <- matrix(0, nrow = 2, ncol = G)
+  sigma2 <- rep(0, G)
+  alpha <- rep(0.1, G) 
+  eta <- rep(5.0, G)   
+  
+  for (g in 1:G) {
+    idx <- which(random_clusters == g)
+    if(length(idx) > 2) {
+      mod <- lm(y[idx] ~ x[idx])
+      beta[, g] <- coef(mod)
+      sigma2[g] <- max(var(resid(mod)), 1e-6) 
+    } else {
+      beta[, g] <- c(mean(y), 0)
+      sigma2[g] <- max(var(y), 1e-6) 
+    }
+  }
+  
+  ll_old <- -Inf
+  iter <- 0
+  
+  for (iter in 1:max_iter) {
+    dens_comp <- matrix(0, nrow = n, ncol = G)
+    v_hat <- matrix(0, nrow = n, ncol = G)
+    
+    for (g in 1:G) {
+      mu_g <- X %*% beta[, g]
+      dens_good <- dnorm(y, mean = mu_g, sd = sqrt(sigma2[g]))
+      dens_contam <- dnorm(y, mean = mu_g, sd = sqrt(eta[g] * sigma2[g]))
+      
+      dens_comp[, g] <- (1 - alpha[g]) * dens_good + alpha[g] * dens_contam
+      v_hat[, g] <- ((1 - alpha[g]) * dens_good) / pmax(dens_comp[, g], 1e-16)
+    }
+    
+    weighted_dens <- sweep(dens_comp, 2, pi_g, "*")
+    total_dens <- rowSums(weighted_dens)
+    z_hat <- sweep(weighted_dens, 1, total_dens, "/")
+    
+    ll_new <- sum(log(pmax(total_dens, 1e-16)))
+    
+    if (is.na(ll_new) || abs(ll_new - ll_old) < tol) {
+      break
+    }
+    ll_old <- ll_new
+    
+    n_g <- colSums(z_hat)
+    pi_g <- n_g / n
+    
+    for (g in 1:G) {
+      alpha[g] <- 1 - sum(z_hat[, g] * v_hat[, g]) / max(n_g[g], 1e-8)
+      alpha[g] <- min(max(alpha[g], 1e-4), 0.9999) 
+      
+      w_ig <- z_hat[, g] * (v_hat[, g] + (1 - v_hat[, g]) / eta[g])
+      W <- diag(w_ig)
+      
+      beta[, g] <- tryCatch({
+        solve(t(X) %*% W %*% X) %*% t(X) %*% W %*% y
+      }, error = function(e) beta[, g])
+      
+      mu_g <- X %*% beta[, g]
+      resid2 <- (y - mu_g)^2
+      
+      sigma2[g] <- max(sum(w_ig * resid2) / max(n_g[g], 1e-8), 1e-6)
+      
+      num_eta <- sum(z_hat[, g] * (1 - v_hat[, g]) * resid2)
+      den_eta <- sigma2[g] * sum(z_hat[, g] * (1 - v_hat[, g]))
+      eta[g] <- max(num_eta / max(den_eta, 1e-8), 1.001) 
+    }
+  }
+  
+  return(list(pi = pi_g, beta = beta, sigma2 = sigma2, alpha = alpha, eta = eta, ll = ll_new, iter = iter))
+}
+
+# 2. Wrapper function (Seed set here)
+run_best_mcn <- function(x, y, G = 2, n_starts = 10) {
+  
+  best_res <- NULL
+  best_ll <- -Inf
+  
+  # Set the seed ONCE outside the loop for reproducibility
+  set.seed(42) 
+  
+  cat("Running", n_starts, "random initializations...\n")
+  
+  for (i in 1:n_starts) {
+    res <- fit_mcn_reg_random(x, y, G = G, max_iter = 1000, tol = 1e-6)
+    
+    cat("Attempt", i, "- Log-Likelihood:", res$ll, "\n")
+    
+    if (!is.na(res$ll) && res$ll > best_ll) {
+      best_ll <- res$ll
+      best_res <- res
+    }
+  }
+  
+  cat("\n=== BEST MODEL SELECTED ===\n")
+  cat("Best Log-Likelihood:", best_res$ll, "\n\n")
+  
+  cat("--- Parameter Estimates ---\n")
+  for(g in 1:G) {
+    cat(sprintf("Component %d:\n", g))
+    cat(sprintf("  pi (weight) : %.4f\n", best_res$pi[g]))
+    cat(sprintf("  beta0 (int) : %.4f\n", best_res$beta[1, g]))
+    cat(sprintf("  beta1 (slp) : %.4f\n", best_res$beta[2, g]))
+    cat(sprintf("  sigma2      : %.4f\n", best_res$sigma2[g]))
+    cat(sprintf("  alpha (out) : %.4f\n", best_res$alpha[g]))
+    cat(sprintf("  eta (infl)  : %.4f\n\n", best_res$eta[g]))
+  }
+  
+  return(best_res)
+}
+
+# Run the fixed multi-start
+best_model <- run_best_mcn(dat$x, dat$y, G = 2, n_starts = 10)
+
+
+```
+```{r}
+
+best_model$iter
+
+```
+```{r}
+library(ggplot2)
+
+# 0. FORCE the environment to use the best model found by the multi-start loop
+res <- best_model
+
+# 1. Extract final parameters from the true global maximum
+pi_g <- res$pi
+beta <- res$beta
+sigma2 <- res$sigma2
+alpha <- res$alpha
+eta <- res$eta
+
+n <- nrow(dat)
+X <- cbind(1, dat$x)
+G <- 2
+
+# 2. Recalculate Posteriors (E-step) at convergence
+dens_comp <- matrix(0, nrow = n, ncol = G)
+v_hat <- matrix(0, nrow = n, ncol = G)
+
+for (g in 1:G) {
+  mu_g <- X %*% beta[, g]
+  dens_good <- dnorm(dat$y, mean = mu_g, sd = sqrt(sigma2[g]))
+  dens_contam <- dnorm(dat$y, mean = mu_g, sd = sqrt(eta[g] * sigma2[g]))
+  
+  dens_comp[, g] <- (1 - alpha[g]) * dens_good + alpha[g] * dens_contam
+  # v_hat is the probability of being "GOOD" data
+  v_hat[, g] <- ((1 - alpha[g]) * dens_good) / pmax(dens_comp[, g], 1e-16)
+}
+
+weighted_dens <- sweep(dens_comp, 2, pi_g, "*")
+total_dens <- rowSums(weighted_dens)
+# z_hat is the probability of belonging to component g
+z_hat <- sweep(weighted_dens, 1, total_dens, "/")
+
+# 3. Maximum A Posteriori (MAP) Classification
+# Assign to the component with the highest z_hat
+comp_assignment <- max.col(z_hat)
+
+# Classify as an outlier if v_hat (probability of being good) is < 0.5
+is_outlier <- rep(FALSE, n)
+for(i in 1:n) {
+  g <- comp_assignment[i]
+  if (v_hat[i, g] < 0.5) {
+    is_outlier[i] <- TRUE
+  }
+}
+
+# 4. Add classifications to the dataframe
+dat$Cluster <- as.factor(comp_assignment)
+dat$Status <- as.factor(ifelse(is_outlier, "Outlier", "Good Data"))
+
+# 5. Plot the Data and Fitted Lines
+p_fit <- ggplot(dat, aes(x = x, y = y)) +
+  geom_point(aes(color = Cluster, shape = Status), size = 2.5, alpha = 0.8) +
+  scale_color_manual(values = c("1" = "royalblue", "2" = "firebrick")) +
+  scale_shape_manual(values = c("Good Data" = 16, "Outlier" = 4)) + # 16=circle, 4=cross
+  # Add fitted regression lines for both components using the global maximum betas
+  geom_abline(intercept = beta[1,1], slope = beta[2,1], color = "royalblue", linewidth = 1) +
+  geom_abline(intercept = beta[1,2], slope = beta[2,2], color = "firebrick", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "Mixture of Contaminated Normal Regressions (G=2)",
+       x = "Covariate (x)", y = "Response (y)",
+       color = "Assigned Component", shape = "Observation Status") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(p_fit)
+ggsave("mcn_fitted_global_max.png", plot = p_fit, width = 7, height = 5, dpi = 300)
+
+
+
+```
+
+
+```{r}
+# Extract parameters
+beta <- best_model$beta
+pi_g <- best_model$pi
+n <- nrow(dat)
+X <- cbind(1, dat$x)
+
+# 1. Get posterior probabilities (z_hat) from the best model
+dens_comp <- matrix(0, nrow = n, ncol = 2)
+for (g in 1:2) {
+  mu_g <- X %*% beta[, g]
+  dens_good <- dnorm(dat$y, mean = mu_g, sd = sqrt(best_model$sigma2[g]))
+  dens_contam <- dnorm(dat$y, mean = mu_g, sd = sqrt(best_model$eta[g] * best_model$sigma2[g]))
+  dens_comp[, g] <- (1 - best_model$alpha[g]) * dens_good + best_model$alpha[g] * dens_contam
+}
+weighted_dens <- sweep(dens_comp, 2, pi_g, "*")
+z_hat <- sweep(weighted_dens, 1, rowSums(weighted_dens), "/")
+
+# 2. Calculate Total Sum of Squares (TSS)
+y_bar <- mean(dat$y)
+TSS <- sum((dat$y - y_bar)^2)
+
+# 3. Calculate Weighted Sum of Squared Errors (WSSE)
+WSSE <- 0
+for (g in 1:2) {
+  y_hat_g <- X %*% beta[, g]
+  # Weight squared residuals by posterior membership probability
+  WSSE <- WSSE + sum(z_hat[, g] * (dat$y - y_hat_g)^2)
+}
+
+# 4. Calculate Soft R-squared
+R2_soft <- 1 - (WSSE / TSS)
+
+cat("Soft R-squared:", round(R2_soft, 4), "\n")
+
+
+```
+
+```{r}
+# EM Algorithm for Contaminated Normal Cluster-Weighted Model (CN-CWM)
+# G = 2, with robust bounding and multi-start
+
+fit_cncwm_random <- function(x, y, G = 2, max_iter = 1000, tol = 1e-6) {
+  n <- length(y)
+  X_mat <- cbind(1, x)
+  
+  # Random initialization
+  random_clusters <- sample(1:G, size = n, replace = TRUE)
+  
+  pi_g <- as.numeric(table(random_clusters) / n)
+  
+  # X-marginal parameters
+  mu_x <- rep(0, G)
+  sigma2_x <- rep(0, G)
+  alpha_x <- rep(0.1, G)
+  eta_x <- rep(5.0, G)
+  
+  # Y|X-conditional parameters
+  beta <- matrix(0, nrow = 2, ncol = G)
+  sigma2_y <- rep(0, G)
+  alpha_y <- rep(0.1, G)
+  eta_y <- rep(5.0, G)
+  
+  # Initialize based on random clusters
+  for (g in 1:G) {
+    idx <- which(random_clusters == g)
+    if (length(idx) > 2) {
+      mu_x[g] <- mean(x[idx])
+      sigma2_x[g] <- max(var(x[idx]), 1e-4)
+      
+      mod <- lm(y[idx] ~ x[idx])
+      beta[, g] <- coef(mod)
+      sigma2_y[g] <- max(var(resid(mod)), 1e-4)
+    } else {
+      mu_x[g] <- mean(x)
+      sigma2_x[g] <- max(var(x), 1e-4)
+      beta[, g] <- c(mean(y), 0)
+      sigma2_y[g] <- max(var(y), 1e-4)
+    }
+  }
+  
+  ll_old <- -Inf
+  
+  for (iter in 1:max_iter) {
+    
+    # --- E-STEP ---
+    dens_x <- matrix(0, n, G)
+    dens_y <- matrix(0, n, G)
+    joint_dens <- matrix(0, n, G)
+    
+    v_hat_x <- matrix(0, n, G)
+    v_hat_y <- matrix(0, n, G)
+    
+    for (g in 1:G) {
+      # 1. Marginal X densities
+      dens_good_x <- dnorm(x, mean = mu_x[g], sd = sqrt(sigma2_x[g]))
+      dens_cont_x <- dnorm(x, mean = mu_x[g], sd = sqrt(eta_x[g] * sigma2_x[g]))
+      dens_x[, g] <- (1 - alpha_x[g]) * dens_good_x + alpha_x[g] * dens_cont_x
+      
+      v_hat_x[, g] <- ((1 - alpha_x[g]) * dens_good_x) / pmax(dens_x[, g], 1e-16)
+      
+      # 2. Conditional Y|X densities
+      mu_yg <- X_mat %*% beta[, g]
+      dens_good_y <- dnorm(y, mean = mu_yg, sd = sqrt(sigma2_y[g]))
+      dens_cont_y <- dnorm(y, mean = mu_yg, sd = sqrt(eta_y[g] * sigma2_y[g]))
+      dens_y[, g] <- (1 - alpha_y[g]) * dens_good_y + alpha_y[g] * dens_cont_y
+      
+      v_hat_y[, g] <- ((1 - alpha_y[g]) * dens_good_y) / pmax(dens_y[, g], 1e-16)
+      
+      # 3. Joint Density
+      joint_dens[, g] <- dens_x[, g] * dens_y[, g]
+    }
+    
+    weighted_joint <- sweep(joint_dens, 2, pi_g, "*")
+    total_joint <- rowSums(weighted_joint)
+    z_hat <- sweep(weighted_joint, 1, total_joint, "/")
+    
+    ll_new <- sum(log(pmax(total_joint, 1e-16)))
+    
+    # --- Stopping Rule ---
+    if (is.na(ll_new) || abs(ll_new - ll_old) < tol) break
+    ll_old <- ll_new
+    
+    # --- M-STEP ---
+    n_g <- colSums(z_hat)
+    pi_g <- n_g / n
+    
+    for (g in 1:G) {
+      # --- Update X Marginal Parameters ---
+      alpha_x[g] <- 1 - sum(z_hat[, g] * v_hat_x[, g]) / max(n_g[g], 1e-8)
+      alpha_x[g] <- min(max(alpha_x[g], 1e-4), 0.9999)
+      
+      w_ig_x <- z_hat[, g] * (v_hat_x[, g] + (1 - v_hat_x[, g]) / eta_x[g])
+      
+      mu_x[g] <- sum(w_ig_x * x) / max(sum(w_ig_x), 1e-8)
+      sigma2_x[g] <- max(sum(w_ig_x * (x - mu_x[g])^2) / max(n_g[g], 1e-8), 1e-6)
+      
+      num_eta_x <- sum(z_hat[, g] * (1 - v_hat_x[, g]) * (x - mu_x[g])^2)
+      den_eta_x <- sigma2_x[g] * sum(z_hat[, g] * (1 - v_hat_x[, g]))
+      eta_x[g] <- max(num_eta_x / max(den_eta_x, 1e-8), 1.001)
+      
+      # --- Update Y|X Conditional Parameters ---
+      alpha_y[g] <- 1 - sum(z_hat[, g] * v_hat_y[, g]) / max(n_g[g], 1e-8)
+      alpha_y[g] <- min(max(alpha_y[g], 1e-4), 0.9999)
+      
+      w_ig_y <- z_hat[, g] * (v_hat_y[, g] + (1 - v_hat_y[, g]) / eta_y[g])
+      W_y <- diag(w_ig_y)
+      
+      beta[, g] <- tryCatch({
+        solve(t(X_mat) %*% W_y %*% X_mat) %*% t(X_mat) %*% W_y %*% y
+      }, error = function(e) beta[, g])
+      
+      mu_yg_new <- X_mat %*% beta[, g]
+      resid2_y <- (y - mu_yg_new)^2
+      
+      sigma2_y[g] <- max(sum(w_ig_y * resid2_y) / max(n_g[g], 1e-8), 1e-6)
+      
+      num_eta_y <- sum(z_hat[, g] * (1 - v_hat_y[, g]) * resid2_y)
+      den_eta_y <- sigma2_y[g] * sum(z_hat[, g] * (1 - v_hat_y[, g]))
+      eta_y[g] <- max(num_eta_y / max(den_eta_y, 1e-8), 1.001)
+    }
+  }
+  
+  return(list(pi = pi_g, mu_x = mu_x, sigma2_x = sigma2_x, alpha_x = alpha_x, eta_x = eta_x,
+              beta = beta, sigma2_y = sigma2_y, alpha_y = alpha_y, eta_y = eta_y, 
+              ll = ll_new, iter = iter))
+}
+
+# Wrapper for Multi-Start CN-CWM
+run_best_cncwm <- function(x, y, G = 2, n_starts = 10) {
+  best_res <- NULL
+  best_ll <- -Inf
+  
+  set.seed(42) # For reproducibility of random starts
+  cat("Running", n_starts, "random initializations for CN-CWM...\n")
+  
+  for (i in 1:n_starts) {
+    res <- fit_cncwm_random(x, y, G = G, max_iter = 1000, tol = 1e-6)
+    cat("Attempt", i, "- Log-Likelihood:", res$ll, "\n")
+    if (!is.na(res$ll) && res$ll > best_ll) {
+      best_ll <- res$ll
+      best_res <- res
+    }
+  }
+  
+  cat("\n=== BEST CN-CWM MODEL SELECTED ===\n")
+  cat("Best Log-Likelihood:", best_res$ll, "\n\n")
+  
+  for(g in 1:G) {
+    cat(sprintf("--- Component %d ---\n", g))
+    cat(sprintf("Mixing Weight (pi) : %.4f\n", best_res$pi[g]))
+    cat("  [X-Marginal]\n")
+    cat(sprintf("    mu_x       : %.4f\n", best_res$mu_x[g]))
+    cat(sprintf("    sigma2_x   : %.4f\n", best_res$sigma2_x[g]))
+    cat(sprintf("    alpha_x    : %.4f\n", best_res$alpha_x[g]))
+    cat(sprintf("    eta_x      : %.4f\n", best_res$eta_x[g]))
+    cat("  [Y|X-Conditional]\n")
+    cat(sprintf("    beta0 (int): %.4f\n", best_res$beta[1, g]))
+    cat(sprintf("    beta1 (slp): %.4f\n", best_res$beta[2, g]))
+    cat(sprintf("    sigma2_y   : %.4f\n", best_res$sigma2_y[g]))
+    cat(sprintf("    alpha_y    : %.4f\n", best_res$alpha_y[g]))
+    cat(sprintf("    eta_y      : %.4f\n\n", best_res$eta_y[g]))
+  }
+  return(best_res)
+}
+
+# Execute the fit
+best_cncwm <- run_best_cncwm(dat$x, dat$y, G = 2, n_starts = 10)
+
+```
+
+```{r}
+best_cncwm$iter
+```
+
+```{r}
+library(ggplot2)
+
+# --- Ensure we are using the best CN-CWM model ---
+res_cwm <- best_cncwm 
+n <- nrow(dat)
+X_mat <- cbind(1, dat$x)
+G <- 2
+
+# --- 1. Re-calculate Posteriors at Convergence ---
+dens_x <- matrix(0, n, G)
+dens_y <- matrix(0, n, G)
+joint_dens <- matrix(0, n, G)
+v_hat_x <- matrix(0, n, G)
+v_hat_y <- matrix(0, n, G)
+
+for (g in 1:G) {
+  # X Marginal
+  dens_good_x <- dnorm(dat$x, mean = res_cwm$mu_x[g], sd = sqrt(res_cwm$sigma2_x[g]))
+  dens_cont_x <- dnorm(dat$x, mean = res_cwm$mu_x[g], sd = sqrt(res_cwm$eta_x[g] * res_cwm$sigma2_x[g]))
+  dens_x[, g] <- (1 - res_cwm$alpha_x[g]) * dens_good_x + res_cwm$alpha_x[g] * dens_cont_x
+  v_hat_x[, g] <- ((1 - res_cwm$alpha_x[g]) * dens_good_x) / pmax(dens_x[, g], 1e-16)
+  
+  # Y|X Conditional
+  mu_yg <- X_mat %*% res_cwm$beta[, g]
+  dens_good_y <- dnorm(dat$y, mean = mu_yg, sd = sqrt(res_cwm$sigma2_y[g]))
+  dens_cont_y <- dnorm(dat$y, mean = mu_yg, sd = sqrt(res_cwm$eta_y[g] * res_cwm$sigma2_y[g]))
+  dens_y[, g] <- (1 - res_cwm$alpha_y[g]) * dens_good_y + res_cwm$alpha_y[g] * dens_cont_y
+  v_hat_y[, g] <- ((1 - res_cwm$alpha_y[g]) * dens_good_y) / pmax(dens_y[, g], 1e-16)
+  
+  joint_dens[, g] <- dens_x[, g] * dens_y[, g]
+}
+
+# Posterior component assignment (z_hat)
+weighted_joint <- sweep(joint_dens, 2, res_cwm$pi, "*")
+z_hat <- sweep(weighted_joint, 1, rowSums(weighted_joint), "/")
+comp_assignment <- max.col(z_hat)
+
+# --- 2. Classify Outliers and Leverage Points ---
+# A point is a leverage point if v_hat_x < 0.5 in its assigned component
+# A point is an outlier if v_hat_y < 0.5 in its assigned component
+status <- rep("Good Data", n)
+for(i in 1:n) {
+  g <- comp_assignment[i]
+  is_lev <- v_hat_x[i, g] < 0.5
+  is_out <- v_hat_y[i, g] < 0.5
+  
+  if (is_lev && !is_out) status[i] <- "Leverage Point (Bad X)"
+  if (!is_lev && is_out) status[i] <- "Vertical Outlier (Bad Y)"
+  if (is_lev && is_out) status[i] <- "Both (Bad X & Y)"
+}
+
+dat$Cluster <- as.factor(comp_assignment)
+dat$Status <- as.factor(status)
+
+# --- 3. Plotting ---
+p_cwm <- ggplot(dat, aes(x = x, y = y)) +
+  geom_point(aes(color = Cluster, shape = Status), size = 2.5, alpha = 0.8) +
+  scale_color_manual(values = c("1" = "royalblue", "2" = "firebrick")) +
+  scale_shape_manual(values = c("Good Data" = 16, 
+                                "Leverage Point (Bad X)" = 17, # Triangle
+                                "Vertical Outlier (Bad Y)" = 4, # Cross
+                                "Both (Bad X & Y)" = 8)) + # Star
+  geom_abline(intercept = res_cwm$beta[1,1], slope = res_cwm$beta[2,1], color = "royalblue", linewidth = 1) +
+  geom_abline(intercept = res_cwm$beta[1,2], slope = res_cwm$beta[2,2], color = "firebrick", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "Contaminated Normal Cluster-Weighted Model (CN-CWM)",
+       x = "Covariate (x)", y = "Response (y)") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(p_cwm)
+ggsave("cncwm_fitted.png", plot = p_cwm, width = 7, height = 5, dpi = 300)
+
+# --- 4. Prediction at x = 0.5 ---
+x_new <- 0.5
+dens_x_new <- numeric(G)
+for(g in 1:G) {
+  dg_x <- dnorm(x_new, res_cwm$mu_x[g], sqrt(res_cwm$sigma2_x[g]))
+  dc_x <- dnorm(x_new, res_cwm$mu_x[g], sqrt(res_cwm$eta_x[g] * res_cwm$sigma2_x[g]))
+  dens_x_new[g] <- (1 - res_cwm$alpha_x[g]) * dg_x + res_cwm$alpha_x[g] * dc_x
+}
+# Component weights conditional on x=0.5
+weighted_dens_x_new <- res_cwm$pi * dens_x_new
+pi_g_given_x <- weighted_dens_x_new / sum(weighted_dens_x_new)
+
+y_pred_1 <- res_cwm$beta[1,1] + res_cwm$beta[2,1] * x_new
+y_pred_2 <- res_cwm$beta[1,2] + res_cwm$beta[2,2] * x_new
+y_expected <- sum(pi_g_given_x * c(y_pred_1, y_pred_2))
+
+cat("--- Prediction at x = 0.5 ---\n")
+cat("pi_1(x=0.5):", pi_g_given_x[1], "\n")
+cat("pi_2(x=0.5):", pi_g_given_x[2], "\n")
+cat("E(Y | x=0.5):", y_expected, "\n\n")
+
+# --- 5. Soft R-squared ---
+y_bar <- mean(dat$y)
+TSS <- sum((dat$y - y_bar)^2)
+WSSE <- 0
+for (g in 1:G) {
+  y_hat_g <- X_mat %*% res_cwm$beta[, g]
+  WSSE <- WSSE + sum(z_hat[, g] * (dat$y - y_hat_g)^2)
+}
+R2_soft <- 1 - (WSSE / TSS)
+cat("Soft R-squared (CN-CWM):", R2_soft, "\n")
+
+```
